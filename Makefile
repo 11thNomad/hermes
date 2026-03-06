@@ -1,0 +1,38 @@
+SHELL := /bin/bash
+
+.PHONY: bootstrap dev build check lint fmt test smoke-phase1 logs clean
+
+bootstrap:
+	cp -n .env.example .env || true
+	cd frontend && npm install
+
+dev:
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+build:
+	docker compose build
+
+check:
+	cargo check --workspace
+	cd frontend && npm run check
+	cd frontend && npm run build
+
+lint:
+	cargo clippy --workspace --all-targets -- -D warnings
+	cd frontend && npm run lint
+
+fmt:
+	cargo fmt --all
+	cd frontend && npm run format
+
+test:
+	cargo test --workspace
+
+smoke-phase1:
+	bash scripts/phase1_smoke.sh
+
+logs:
+	docker compose logs -f api worker frontend
+
+clean:
+	docker compose down -v --remove-orphans

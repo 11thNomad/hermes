@@ -1,0 +1,11 @@
+[package]
+name = "worker"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+common = { path = "../common" }
+tokio.workspace = true
+tracing.workspace = true

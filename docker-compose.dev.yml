@@ -1,0 +1,27 @@
+services:
+  api:
+    build:
+      target: runtime
+    volumes:
+      - .:/workspace
+    command: ["cargo", "run", "-p", "api"]
+
+  worker:
+    build:
+      target: runtime
+    volumes:
+      - .:/workspace
+    command: ["cargo", "run", "-p", "worker"]
+
+  frontend:
+    build:
+      target: dev
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    command: ["sh", "-lc", "npm install && npm run dev -- --host 0.0.0.0"]
+    ports:
+      - "5173:5173"
+
+volumes:
+  frontend-node-modules:

@@ -1,0 +1,29 @@
+repos:
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: cargo fmt
+        entry: cargo fmt --all --check
+        language: system
+        pass_filenames: false
+      - id: clippy
+        name: cargo clippy
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+      - id: frontend-lint
+        name: frontend lint
+        entry: bash
+        args:
+          - -lc
+          - cd frontend && npm run lint
+        language: system
+        pass_filenames: false
+      - id: frontend-check
+        name: frontend check
+        entry: bash
+        args:
+          - -lc
+          - cd frontend && npm run check
+        language: system
+        pass_filenames: false

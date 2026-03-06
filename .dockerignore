@@ -1,0 +1,8 @@
+.git
+.gitignore
+target
+.env
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build
+frontend/package-lock.json
