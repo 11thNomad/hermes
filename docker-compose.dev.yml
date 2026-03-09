@@ -1,17 +1,23 @@
 services:
   api:
     build:
-      target: runtime
+      target: dev
     volumes:
       - .:/workspace
-    command: ["cargo", "run", "-p", "api"]
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/workspace/target
+    command: ["cargo", "watch", "--poll", "-x", "run -p api"]
 
   worker:
     build:
-      target: runtime
+      target: dev
     volumes:
       - .:/workspace
-    command: ["cargo", "run", "-p", "worker"]
+      - cargo-registry:/usr/local/cargo/registry
+      - cargo-git:/usr/local/cargo/git
+      - cargo-target:/workspace/target
+    command: ["cargo", "watch", "--poll", "-x", "run -p worker"]
 
   frontend:
     build:
@@ -24,4 +30,7 @@ services:
       - "5173:5173"
 
 volumes:
+  cargo-registry:
+  cargo-git:
+  cargo-target:
   frontend-node-modules:

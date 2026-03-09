@@ -1,5 +1,6 @@
 use axum::{extract::State, routing::get, Json, Router};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::state::AppState;
 
@@ -7,10 +8,16 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(root))
         .route("/healthz", get(healthcheck))
-        .route("/api/healthz", get(healthcheck))
+        .route("/api/healthz", get(api_healthcheck))
 }
 
-async fn root(State(state): State<AppState>) -> Json<HealthResponse> {
+#[utoipa::path(
+    get,
+    path = "/",
+    tag = "system",
+    responses((status = 200, description = "Service info", body = HealthResponse))
+)]
+pub(crate) async fn root(State(state): State<AppState>) -> Json<HealthResponse> {
     Json(HealthResponse {
         service: state.config.app_name,
         kind: "info",
@@ -18,19 +25,39 @@ async fn root(State(state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
-async fn healthcheck(State(state): State<AppState>) -> Json<HealthResponse> {
-    Json(HealthResponse {
+#[utoipa::path(
+    get,
+    path = "/healthz",
+    tag = "system",
+    responses((status = 200, description = "Health check", body = HealthResponse))
+)]
+pub(crate) async fn healthcheck(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(health_payload(state))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/healthz",
+    tag = "system",
+    responses((status = 200, description = "API health check", body = HealthResponse))
+)]
+pub(crate) async fn api_healthcheck(State(state): State<AppState>) -> Json<HealthResponse> {
+    Json(health_payload(state))
+}
+
+fn health_payload(state: AppState) -> HealthResponse {
+    HealthResponse {
         service: state.config.app_name,
         kind: "health",
         ok: true,
-    })
+    }
 }
 
-#[derive(Serialize)]
-struct HealthResponse {
-    service: String,
-    kind: &'static str,
-    ok: bool,
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct HealthResponse {
+    pub(crate) service: String,
+    pub(crate) kind: &'static str,
+    pub(crate) ok: bool,
 }
 
 #[cfg(test)]

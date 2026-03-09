@@ -1,8 +1,8 @@
+mod docs;
 mod routes;
 mod state;
 
 use anyhow::{Context, Result};
-use axum::Router;
 use common::{init_tracing, initialize};
 use http::{
     header::{ACCEPT, CONTENT_TYPE, RANGE},
@@ -32,8 +32,8 @@ async fn main() -> Result<()> {
         "api configuration loaded"
     );
     let state = AppState { config, services };
-    let app = Router::new()
-        .merge(routes::router())
+    let app = routes::router()
+        .merge(docs::router())
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new().level(Level::INFO))

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: bootstrap dev build check lint fmt test smoke-phase1 logs clean
+.PHONY: bootstrap dev build check lint fmt test smoke-phase1 smoke-upload logs clean
 
 bootstrap:
 	cp -n .env.example .env || true
@@ -30,6 +30,9 @@ test:
 
 smoke-phase1:
 	bash scripts/phase1_smoke.sh
+
+smoke-upload:
+	bash scripts/upload_smoke.sh
 
 logs:
 	docker compose logs -f api worker frontend

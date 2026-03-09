@@ -12,13 +12,19 @@
 
 <section class="watch-shell">
   <div class="watch-card">
-    <p class="eyebrow">Watch Placeholder</p>
+    <p class="eyebrow">Raw Playback</p>
     <h1>{id}</h1>
     <p>
-      This page will switch from immediate raw playback to HLS once the worker
-      pipeline is added in later phases.
+      This page plays the uploaded source file directly. A later phase will
+      upgrade the player to HLS automatically when the worker finishes
+      transcoding.
     </p>
-    <code>{streamUrl}</code>
+    <video controls playsinline preload="metadata" src={streamUrl}>
+      <track kind="captions" />
+    </video>
+    <a href={streamUrl} target="_blank" rel="noreferrer"
+      >Open raw stream directly</a
+    >
   </div>
 </section>
 
@@ -31,7 +37,7 @@
   }
 
   .watch-card {
-    width: min(38rem, 100%);
+    width: min(52rem, 100%);
     padding: 2rem;
     border-radius: 1.25rem;
     background: rgba(255, 252, 246, 0.84);
@@ -56,12 +62,20 @@
     line-height: 1.65;
   }
 
-  code {
+  video {
     display: block;
+    width: 100%;
     margin-top: 1.25rem;
-    padding: 1rem;
-    border-radius: 0.85rem;
-    background: rgba(32, 25, 16, 0.08);
-    overflow: auto;
+    border-radius: 1rem;
+    background: #120f0c;
+    aspect-ratio: 16 / 9;
+  }
+
+  a {
+    display: inline-flex;
+    margin-top: 1rem;
+    color: #201910;
+    text-decoration: none;
+    font-weight: 600;
   }
 </style>
