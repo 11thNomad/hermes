@@ -95,7 +95,7 @@ pub struct UploadVideoResponse {
     pub shareable_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, ToSchema)]
 pub struct VideoStatusResponse {
     pub id: Uuid,
     pub status: VideoStatus,

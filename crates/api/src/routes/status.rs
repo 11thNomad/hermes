@@ -40,7 +40,7 @@ pub(crate) async fn video_status(
     Ok(Json(build_status_response(&state.config.base_url, &video)))
 }
 
-fn build_status_response(base_url: &Url, video: &VideoRecord) -> VideoStatusResponse {
+pub(crate) fn build_status_response(base_url: &Url, video: &VideoRecord) -> VideoStatusResponse {
     VideoStatusResponse {
         id: video.id,
         status: video.status,
@@ -57,7 +57,7 @@ fn build_status_response(base_url: &Url, video: &VideoRecord) -> VideoStatusResp
     }
 }
 
-fn join_api_url(base_url: &Url, path: &str) -> String {
+pub(crate) fn join_api_url(base_url: &Url, path: &str) -> String {
     base_url
         .join(path)
         .expect("status API paths should be valid URLs")

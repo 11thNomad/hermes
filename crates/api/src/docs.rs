@@ -13,6 +13,7 @@ use crate::state::AppState;
         crate::routes::health::api_healthcheck,
         crate::routes::upload::upload_video,
         crate::routes::status::video_status,
+        crate::routes::events::video_events,
         crate::routes::stream::stream_video
     ),
     components(
