@@ -1,4 +1,5 @@
 pub(crate) mod health;
+pub(crate) mod status;
 pub(crate) mod stream;
 pub(crate) mod upload;
 
@@ -16,6 +17,7 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .merge(health::router())
+        .merge(status::router())
         .merge(upload::router())
         .merge(stream::router())
 }

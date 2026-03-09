@@ -95,6 +95,15 @@ pub struct UploadVideoResponse {
     pub shareable_url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct VideoStatusResponse {
+    pub id: Uuid,
+    pub status: VideoStatus,
+    pub raw_stream_url: String,
+    pub hls_playlist_url: Option<String>,
+    pub error_msg: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscodeJob {
     pub video_id: Uuid,
