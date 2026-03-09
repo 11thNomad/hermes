@@ -1,5 +1,6 @@
 use anyhow::Result;
 use common::{
+    db::mark_video_processing,
     init_tracing, initialize,
     queue::{ack_transcode_job, read_transcode_job},
 };
@@ -30,9 +31,12 @@ async fn main() -> Result<()> {
         .await
         {
             Ok(Some(queued_job)) => {
+                let video = mark_video_processing(&services.db, queued_job.job.video_id).await?;
                 info!(
                     message_id = %queued_job.message_id,
-                    video_id = %queued_job.job.video_id,
+                    video_id = %video.id,
+                    status = %video.status.as_str(),
+                    attempt_count = video.attempt_count,
                     source_key = %queued_job.job.source_key,
                     "worker consumed transcode job"
                 );

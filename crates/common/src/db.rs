@@ -81,6 +81,135 @@ pub async fn get_video(pool: &PgPool, id: Uuid) -> Result<Option<VideoRecord>> {
     row.map(map_video_row).transpose()
 }
 
+pub async fn mark_video_processing(pool: &PgPool, id: Uuid) -> Result<VideoRecord> {
+    let row = sqlx::query(
+        r#"
+        UPDATE videos
+        SET
+            status = $2,
+            error_msg = NULL,
+            attempt_count = attempt_count + 1
+        WHERE id = $1
+        RETURNING
+            id,
+            filename,
+            mime_type,
+            size_bytes,
+            status,
+            raw_key,
+            hls_manifest_key,
+            error_msg,
+            detected_format,
+            attempt_count
+        "#,
+    )
+    .bind(id)
+    .bind(VideoStatus::Processing.as_str())
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to mark video `{id}` as processing"))?;
+
+    let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
+    map_video_row(row)
+}
+
+pub async fn mark_video_ready(
+    pool: &PgPool,
+    id: Uuid,
+    hls_manifest_key: &str,
+) -> Result<VideoRecord> {
+    let row = sqlx::query(
+        r#"
+        UPDATE videos
+        SET
+            status = $2,
+            hls_manifest_key = $3,
+            error_msg = NULL
+        WHERE id = $1
+        RETURNING
+            id,
+            filename,
+            mime_type,
+            size_bytes,
+            status,
+            raw_key,
+            hls_manifest_key,
+            error_msg,
+            detected_format,
+            attempt_count
+        "#,
+    )
+    .bind(id)
+    .bind(VideoStatus::Ready.as_str())
+    .bind(hls_manifest_key)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to mark video `{id}` as ready"))?;
+
+    let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
+    map_video_row(row)
+}
+
+pub async fn mark_video_failed(pool: &PgPool, id: Uuid, error_msg: &str) -> Result<VideoRecord> {
+    let row = sqlx::query(
+        r#"
+        UPDATE videos
+        SET
+            status = $2,
+            error_msg = $3
+        WHERE id = $1
+        RETURNING
+            id,
+            filename,
+            mime_type,
+            size_bytes,
+            status,
+            raw_key,
+            hls_manifest_key,
+            error_msg,
+            detected_format,
+            attempt_count
+        "#,
+    )
+    .bind(id)
+    .bind(VideoStatus::Failed.as_str())
+    .bind(error_msg)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to mark video `{id}` as failed"))?;
+
+    let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
+    map_video_row(row)
+}
+
+pub async fn increment_video_attempt_count(pool: &PgPool, id: Uuid) -> Result<VideoRecord> {
+    let row = sqlx::query(
+        r#"
+        UPDATE videos
+        SET attempt_count = attempt_count + 1
+        WHERE id = $1
+        RETURNING
+            id,
+            filename,
+            mime_type,
+            size_bytes,
+            status,
+            raw_key,
+            hls_manifest_key,
+            error_msg,
+            detected_format,
+            attempt_count
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to increment attempt count for video `{id}`"))?;
+
+    let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
+    map_video_row(row)
+}
+
 pub async fn delete_video(pool: &PgPool, id: Uuid) -> Result<()> {
     sqlx::query("DELETE FROM videos WHERE id = $1")
         .bind(id)
