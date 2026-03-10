@@ -12,3 +12,4 @@ futures-util.workspace = true
 redis.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true

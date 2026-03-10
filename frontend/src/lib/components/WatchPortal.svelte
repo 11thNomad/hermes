@@ -8,7 +8,7 @@
   import type Hls from 'hls.js';
 
   type VideoStatus = 'pending' | 'processing' | 'ready' | 'failed';
-  type LiveMode = 'sse' | 'polling' | 'offline';
+  type LiveMode = 'sse' | 'offline';
   type PlaybackMode = 'raw' | 'hls';
 
   type VideoStatusPayload = {
@@ -26,7 +26,6 @@
     size_bytes: number;
   };
 
-  const POLL_INTERVAL_MS = 3000;
   const AUTOPLAY_STORAGE_KEY = 'hermes-autoplay-video-id';
 
   export let routeVideoId = '';
@@ -51,7 +50,6 @@
 
   let videoEl: HTMLVideoElement | null = null;
   let eventSource: EventSource | null = null;
-  let pollHandle: ReturnType<typeof setInterval> | null = null;
   let hls: Hls | null = null;
   let activeHlsUrl: string | null = null;
 
@@ -72,7 +70,6 @@
   onMount(() => {
     return () => {
       stopEvents();
-      stopPolling();
       destroyHls();
     };
   });
@@ -108,7 +105,7 @@
     }
 
     if (typeof EventSource === 'undefined') {
-      startPolling(nextId, nextActivationId);
+      liveMode = 'offline';
       return;
     }
 
@@ -117,7 +114,6 @@
 
   function resetSession() {
     stopEvents();
-    stopPolling();
     destroyHls();
     activeHlsUrl = null;
     switchingToHls = false;
@@ -207,7 +203,15 @@
 
     const source = new EventSource(apiUrl(`/api/videos/${targetId}/events`));
     eventSource = source;
-    liveMode = 'sse';
+    liveMode = 'offline';
+
+    source.onopen = () => {
+      if (requestActivationId !== activationId || targetId !== activeVideoId) {
+        return;
+      }
+
+      liveMode = 'sse';
+    };
 
     source.addEventListener('status', (event) => {
       if (requestActivationId !== activationId || targetId !== activeVideoId) {
@@ -226,24 +230,8 @@
         return;
       }
 
-      stopEvents();
-      startPolling(targetId, requestActivationId);
+      liveMode = 'offline';
     };
-  }
-
-  function startPolling(targetId: string, requestActivationId: number) {
-    stopPolling();
-    liveMode = 'polling';
-
-    pollHandle = setInterval(() => {
-      if (requestActivationId !== activationId || targetId !== activeVideoId) {
-        stopPolling();
-        return;
-      }
-
-      void refreshStatus(targetId, requestActivationId);
-      void refreshRecentVideos();
-    }, POLL_INTERVAL_MS);
   }
 
   function stopEvents() {
@@ -253,15 +241,6 @@
 
     eventSource.close();
     eventSource = null;
-  }
-
-  function stopPolling() {
-    if (!pollHandle) {
-      return;
-    }
-
-    clearInterval(pollHandle);
-    pollHandle = null;
   }
 
   async function upgradeToHls(playlistUrl: string, targetId: string) {
@@ -506,10 +485,8 @@
     switch (value) {
       case 'sse':
         return 'Live updates';
-      case 'polling':
-        return 'Polling fallback';
       default:
-        return 'Connecting';
+        return 'Reconnecting';
     }
   }
 
@@ -743,8 +720,9 @@
           <span class="detail-label">Live updates</span>
           <strong>{liveModeLabel(liveMode)}</strong>
           <p>
-            Server-sent events drive the switch. Polling takes over if the live
-            stream drops.
+            Server-sent events drive the switch. If the stream drops, Hermes
+            waits for the browser to reconnect instead of starting interval
+            polling.
           </p>
         </div>
       </div>
@@ -815,7 +793,8 @@
       videoId={id || null}
       {liveMode}
       {playbackMode}
-      recentVideoCount={recentVideos.length}
+      {recentVideos}
+      statusPayload={status}
     />
   </div>
 </section>

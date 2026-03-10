@@ -3,208 +3,86 @@
   import { apiUrl } from '$lib/api';
 
   type PlaybackMode = 'raw' | 'hls';
-  type LiveMode = 'sse' | 'polling' | 'offline';
+  type LiveMode = 'sse' | 'offline';
   type VideoStatus = 'pending' | 'processing' | 'ready' | 'failed';
 
-  type DiagnosticCard = {
-    key: string;
-    label: string;
-    detail: string;
-    state: 'ok' | 'warn' | 'error' | 'loading';
-    httpStatus: number | null;
-    payloadPreview: string;
+  type VideoStatusPayload = {
+    id: string;
+    status: VideoStatus;
+    raw_stream_url: string;
+    hls_playlist_url: string | null;
+    error_msg: string | null;
   };
 
-  type StatusPayload = {
+  type VideoListItem = {
+    id: string;
+    filename: string;
     status: VideoStatus;
-    hls_playlist_url: string | null;
+    size_bytes: number;
+  };
+
+  type DiagnosticLine = {
+    key: string;
+    endpoint: string;
+    response: string;
+    state: 'ok' | 'warn' | 'error' | 'loading';
   };
 
   export let videoId: string | null = null;
   export let liveMode: LiveMode = 'offline';
   export let playbackMode: PlaybackMode = 'raw';
-  export let recentVideoCount = 0;
-
-  const POLL_INTERVAL_MS = 4000;
+  export let recentVideos: VideoListItem[] = [];
+  export let statusPayload: VideoStatusPayload | null = null;
 
   let diagnosticsOpen = true;
-  let cards: DiagnosticCard[] = [
-    loadingCard('info', 'Service info'),
-    loadingCard('healthz', '/healthz'),
-    loadingCard('api-healthz', '/api/healthz'),
-    loadingCard('videos', '/api/videos'),
-    loadingCard('status', 'Video status')
+  let staticLines: DiagnosticLine[] = [
+    loadingLine('info', '/'),
+    loadingLine('healthz', '/healthz'),
+    loadingLine('api-healthz', '/api/healthz')
   ];
-  let lastRefreshedAt = 'waiting for first poll';
+
+  $: lines = [
+    ...staticLines,
+    buildVideosLine(),
+    buildStatusLine(),
+    buildSessionLine()
+  ];
 
   onMount(() => {
-    let cancelled = false;
-    let pollHandle: ReturnType<typeof setInterval> | null = null;
-
-    async function bootstrap() {
-      await refreshDiagnostics();
-      if (cancelled) {
-        return;
-      }
-
-      pollHandle = setInterval(() => {
-        void refreshDiagnostics();
-      }, POLL_INTERVAL_MS);
-    }
-
-    bootstrap();
-
-    return () => {
-      cancelled = true;
-      if (pollHandle) {
-        clearInterval(pollHandle);
-      }
-    };
+    void refreshStaticDiagnostics();
   });
 
-  async function refreshDiagnostics() {
-    const nextCards = await Promise.all([
-      fetchJsonCard('info', 'Service info', '/'),
-      fetchJsonCard('healthz', '/healthz', '/healthz'),
-      fetchJsonCard('api-healthz', '/api/healthz', '/api/healthz'),
-      fetchVideosCard(),
-      fetchStatusCard()
+  async function refreshStaticDiagnostics() {
+    staticLines = await Promise.all([
+      fetchJsonLine('info', '/'),
+      fetchJsonLine('healthz', '/healthz'),
+      fetchJsonLine('api-healthz', '/api/healthz')
     ]);
-
-    cards = nextCards;
-    lastRefreshedAt = new Date().toLocaleTimeString();
   }
 
-  async function fetchJsonCard(
+  async function fetchJsonLine(
     key: string,
-    label: string,
     path: string
-  ): Promise<DiagnosticCard> {
+  ): Promise<DiagnosticLine> {
     try {
       const response = await fetch(apiUrl(path));
       const payload = await safeJson(response);
-      const ok =
-        response.ok &&
-        payload &&
-        typeof payload === 'object' &&
-        'ok' in payload;
 
       return {
         key,
-        label,
-        detail:
-          ok && payload && typeof payload === 'object' && 'service' in payload
-            ? `${String(payload.service)} responded`
-            : response.ok
-              ? 'reachable'
-              : extractError(payload),
-        state: response.ok ? 'ok' : 'error',
-        httpStatus: response.status,
-        payloadPreview: formatPayload(payload)
+        endpoint: path,
+        response: formatHttpResponse(response.status, payload),
+        state: response.ok ? 'ok' : 'error'
       };
     } catch (error) {
       return {
         key,
-        label,
-        detail: error instanceof Error ? error.message : 'request failed',
-        state: 'error',
-        httpStatus: null,
-        payloadPreview:
-          error instanceof Error ? error.message : 'request failed'
-      };
-    }
-  }
-
-  async function fetchVideosCard(): Promise<DiagnosticCard> {
-    try {
-      const response = await fetch(apiUrl('/api/videos'));
-      const payload = await safeJson(response);
-
-      if (!response.ok) {
-        return {
-          key: 'videos',
-          label: '/api/videos',
-          detail: extractError(payload),
-          state: 'error',
-          httpStatus: response.status,
-          payloadPreview: formatPayload(payload)
-        };
-      }
-
-      const count = Array.isArray(payload) ? payload.length : recentVideoCount;
-
-      return {
-        key: 'videos',
-        label: '/api/videos',
-        detail: `${count} recent uploads visible`,
-        state: 'ok',
-        httpStatus: response.status,
-        payloadPreview: formatPayload(payload)
-      };
-    } catch (error) {
-      return {
-        key: 'videos',
-        label: '/api/videos',
-        detail: error instanceof Error ? error.message : 'request failed',
-        state: 'error',
-        httpStatus: null,
-        payloadPreview:
-          error instanceof Error ? error.message : 'request failed'
-      };
-    }
-  }
-
-  async function fetchStatusCard(): Promise<DiagnosticCard> {
-    if (!videoId) {
-      return {
-        key: 'status',
-        label: 'Video status',
-        detail: 'no active video selected',
-        state: 'warn',
-        httpStatus: null,
-        payloadPreview: 'No active video selected.'
-      };
-    }
-
-    try {
-      const response = await fetch(apiUrl(`/api/videos/${videoId}/status`));
-      const payload = (await safeJson(response)) as
-        | StatusPayload
-        | { error?: string }
-        | null;
-
-      if (!response.ok) {
-        return {
-          key: 'status',
-          label: 'Video status',
-          detail: extractError(payload),
-          state: 'error',
-          httpStatus: response.status,
-          payloadPreview: formatPayload(payload)
-        };
-      }
-
-      const status = (payload as StatusPayload).status;
-      const hasHls = Boolean((payload as StatusPayload).hls_playlist_url);
-
-      return {
-        key: 'status',
-        label: 'Video status',
-        detail: hasHls ? `${status} with HLS` : status,
-        state:
-          status === 'failed' ? 'error' : status === 'ready' ? 'ok' : 'warn',
-        httpStatus: response.status,
-        payloadPreview: formatPayload(payload)
-      };
-    } catch (error) {
-      return {
-        key: 'status',
-        label: 'Video status',
-        detail: error instanceof Error ? error.message : 'request failed',
-        state: 'error',
-        httpStatus: null,
-        payloadPreview:
-          error instanceof Error ? error.message : 'request failed'
+        endpoint: path,
+        response:
+          error instanceof Error
+            ? error.message
+            : 'request failed unexpectedly',
+        state: 'error'
       };
     }
   }
@@ -217,29 +95,87 @@
     }
   }
 
-  function extractError(payload: unknown): string {
-    if (payload && typeof payload === 'object' && 'error' in payload) {
-      return typeof payload.error === 'string'
-        ? payload.error
-        : 'request failed';
-    }
-
-    return 'request failed';
+  function buildVideosLine(): DiagnosticLine {
+    return {
+      key: 'videos',
+      endpoint: '/api/videos',
+      response: formatHttpResponse(200, recentVideos),
+      state: 'ok'
+    };
   }
 
-  function loadingCard(key: string, label: string): DiagnosticCard {
+  function buildStatusLine(): DiagnosticLine {
+    if (!videoId) {
+      return {
+        key: 'status',
+        endpoint: '/api/videos/:id/status',
+        response: 'no active video selected',
+        state: 'warn'
+      };
+    }
+
+    if (!statusPayload) {
+      return {
+        key: 'status',
+        endpoint: `/api/videos/${videoId}/status`,
+        response: 'waiting for the first status payload',
+        state: 'loading'
+      };
+    }
+
+    return {
+      key: 'status',
+      endpoint: `/api/videos/${videoId}/status`,
+      response: formatPayload(statusPayload),
+      state: statusState(statusPayload.status)
+    };
+  }
+
+  function buildSessionLine(): DiagnosticLine {
+    return {
+      key: 'session',
+      endpoint: 'session',
+      response: JSON.stringify({
+        liveMode,
+        playbackMode,
+        recentVideoCount: recentVideos.length,
+        activeVideoId: videoId
+      }),
+      state: liveMode === 'offline' && videoId ? 'warn' : 'ok'
+    };
+  }
+
+  function statusState(
+    value: VideoStatus
+  ): 'ok' | 'warn' | 'error' | 'loading' {
+    switch (value) {
+      case 'ready':
+        return 'ok';
+      case 'failed':
+        return 'error';
+      case 'pending':
+      case 'processing':
+        return 'warn';
+      default:
+        return 'loading';
+    }
+  }
+
+  function loadingLine(key: string, endpoint: string): DiagnosticLine {
     return {
       key,
-      label,
-      detail: 'polling...',
-      state: 'loading',
-      httpStatus: null,
-      payloadPreview: 'Waiting for the first response payload...'
+      endpoint,
+      response: 'waiting for response',
+      state: 'loading'
     };
   }
 
   function sessionModeLabel(): string {
     return `${liveMode.toUpperCase()} updates • ${playbackMode.toUpperCase()} playback`;
+  }
+
+  function formatHttpResponse(status: number, payload: unknown): string {
+    return `HTTP ${status} ${formatPayload(payload)}`;
   }
 
   function formatPayload(payload: unknown): string {
@@ -252,19 +188,19 @@
     }
 
     try {
-      return truncate(JSON.stringify(payload, null, 2));
+      return truncate(JSON.stringify(payload));
     } catch {
       return '[unserializable payload]';
     }
   }
 
   function truncate(value: string): string {
-    const MAX_PREVIEW_CHARS = 420;
+    const MAX_PREVIEW_CHARS = 240;
     if (value.length <= MAX_PREVIEW_CHARS) {
       return value;
     }
 
-    return `${value.slice(0, MAX_PREVIEW_CHARS)}\n...`;
+    return `${value.slice(0, MAX_PREVIEW_CHARS - 3)}...`;
   }
 </script>
 
@@ -272,12 +208,18 @@
   <div class="footer-bar">
     <div>
       <p class="eyebrow">Dev diagnostics</p>
-      <strong>Last refresh {lastRefreshedAt}</strong>
-      <p>{sessionModeLabel()}</p>
+      <strong>{sessionModeLabel()}</strong>
+      <p>
+        {#if videoId}
+          active video {videoId}
+        {:else}
+          watch portal idle
+        {/if}
+      </p>
     </div>
 
     <div class="footer-actions">
-      <span class="summary-pill">{recentVideoCount} uploads listed</span>
+      <span class="summary-pill">{recentVideos.length} uploads listed</span>
       <button
         class="toggle-button"
         type="button"
@@ -291,50 +233,19 @@
   </div>
 
   {#if diagnosticsOpen}
-    <div class="diagnostic-grid">
-      {#each cards as card}
-        <div class="diagnostic-card">
-          <div class="card-head">
-            <span
-              class:ok={card.state === 'ok'}
-              class:warn={card.state === 'warn'}
-              class:error={card.state === 'error'}
-              class:loading={card.state === 'loading'}
-              class="state-dot"
-            ></span>
-            <strong>{card.label}</strong>
-          </div>
-          <p>{card.detail}</p>
-          <span class="http-meta">
-            {#if card.httpStatus}
-              HTTP {card.httpStatus}
-            {:else}
-              no HTTP code
-            {/if}
-          </span>
-          <pre>{card.payloadPreview}</pre>
+    <div class="diagnostic-lines">
+      {#each lines as line}
+        <div class="diagnostic-line">
+          <span
+            class:ok={line.state === 'ok'}
+            class:warn={line.state === 'warn'}
+            class:error={line.state === 'error'}
+            class:loading={line.state === 'loading'}
+            class="state-dot"
+          ></span>
+          <code>{line.endpoint} -&gt; {line.response}</code>
         </div>
       {/each}
-
-      <div class="diagnostic-card session-card">
-        <div class="card-head">
-          <span class="state-dot ok"></span>
-          <strong>Session</strong>
-        </div>
-        <p>{sessionModeLabel()}</p>
-        <span class="http-meta">
-          {#if videoId}
-            active video {videoId}
-          {:else}
-            watch portal idle
-          {/if}
-        </span>
-        <pre>{JSON.stringify(
-            { liveMode, playbackMode, recentVideoCount },
-            null,
-            2
-          )}</pre>
-      </div>
     </div>
   {/if}
 </footer>
@@ -361,13 +272,11 @@
     align-items: center;
   }
 
-  .footer-bar strong,
-  .diagnostic-card strong {
+  .footer-bar strong {
     display: block;
   }
 
-  .footer-bar p,
-  .diagnostic-card p {
+  .footer-bar p {
     margin: 0.3rem 0 0;
     color: rgba(235, 246, 255, 0.78);
     line-height: 1.45;
@@ -414,38 +323,30 @@
     cursor: pointer;
   }
 
-  .diagnostic-grid {
+  .diagnostic-lines {
     margin-top: 0.95rem;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
-    gap: 0.8rem;
+    gap: 0.55rem;
   }
 
-  .diagnostic-card {
-    min-width: 0;
-    padding: 0.9rem;
-    border-radius: 1rem;
-    background: rgba(255, 255, 255, 0.08);
-    border: 1px solid rgba(196, 227, 250, 0.14);
+  .diagnostic-line {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.7rem;
+    align-items: start;
+    padding: 0.35rem 0;
+    border-bottom: 1px solid rgba(196, 227, 250, 0.1);
   }
 
-  .card-head {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
-    min-width: 0;
-  }
-
-  .card-head strong {
-    min-width: 0;
-    overflow-wrap: anywhere;
+  .diagnostic-line:last-child {
+    border-bottom: 0;
   }
 
   .state-dot {
     width: 0.7rem;
     height: 0.7rem;
     border-radius: 999px;
-    flex: 0 0 auto;
+    margin-top: 0.32rem;
     background: rgba(255, 255, 255, 0.28);
   }
 
@@ -468,21 +369,11 @@
     background: #9ebdd7;
   }
 
-  .http-meta {
+  code {
     display: block;
-    margin-top: 0.55rem;
-    color: rgba(206, 229, 246, 0.82);
-    font-size: 0.82rem;
-  }
-
-  pre {
-    margin: 0.65rem 0 0;
-    padding: 0.7rem;
-    border-radius: 0.8rem;
-    background: rgba(4, 18, 32, 0.34);
-    color: rgba(228, 243, 255, 0.92);
-    font-size: 0.76rem;
-    line-height: 1.45;
+    color: rgba(228, 243, 255, 0.94);
+    font-size: 0.8rem;
+    line-height: 1.5;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }

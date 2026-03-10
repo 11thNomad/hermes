@@ -3819,6 +3819,7 @@ dependencies = [
  "redis",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

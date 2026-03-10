@@ -143,13 +143,15 @@ async fn process_job(
         "worker downloaded source object"
     );
 
-    match probe::validate_media(&source_path).await? {
-        probe::ProbeOutcome::Valid => {
+    let source_duration = match probe::validate_media(&source_path).await? {
+        probe::ProbeOutcome::Valid(metadata) => {
             info!(
                 message_id = %queued_job.message_id,
                 video_id = %video.id,
+                duration_secs = ?metadata.duration.map(|value| value.as_secs_f64()),
                 "worker ffprobe validation passed"
             );
+            metadata.duration
         }
         probe::ProbeOutcome::InvalidMedia { message } => {
             cleanup_temp_dir(&job_dir).await;
@@ -178,7 +180,7 @@ async fn process_job(
 
             return Ok(());
         }
-    }
+    };
 
     let output_dir = job_dir.join("hls");
     let processing_started_at = Instant::now();
@@ -186,23 +188,25 @@ async fn process_job(
         message_id = %queued_job.message_id,
         video_id = %queued_job.job.video_id,
         source_size_bytes,
+        input_duration_secs = ?source_duration.map(|value| value.as_secs_f64()),
         "worker starting HLS transcode"
     );
-    let upload_summary =
-        match transcode_and_upload(services, &queued_job, &source_path, &output_dir).await {
-            Ok(summary) => summary,
-            Err(error) => {
-                cleanup_temp_dir(&job_dir).await;
-                return retry_or_dlq_job(
-                    services,
-                    config,
-                    &queued_job,
-                    video.attempt_count,
-                    &error,
-                )
+    let upload_summary = match transcode_and_upload(
+        services,
+        &queued_job,
+        &source_path,
+        &output_dir,
+        source_duration,
+    )
+    .await
+    {
+        Ok(summary) => summary,
+        Err(error) => {
+            cleanup_temp_dir(&job_dir).await;
+            return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error)
                 .await;
-            }
-        };
+        }
+    };
     info!(
         message_id = %queued_job.message_id,
         video_id = %queued_job.job.video_id,
@@ -288,9 +292,19 @@ async fn transcode_and_upload(
     queued_job: &QueuedTranscodeJob,
     source_path: &Path,
     output_dir: &Path,
+    source_duration: Option<Duration>,
 ) -> Result<UploadSummary> {
     let transcode_started_at = Instant::now();
-    transcode::transcode_to_hls(source_path, output_dir).await?;
+    transcode::transcode_to_hls(
+        source_path,
+        output_dir,
+        transcode::TranscodeProgressContext {
+            message_id: &queued_job.message_id,
+            video_id: queued_job.job.video_id,
+            input_duration: source_duration,
+        },
+    )
+    .await?;
     info!(
         message_id = %queued_job.message_id,
         video_id = %queued_job.job.video_id,
