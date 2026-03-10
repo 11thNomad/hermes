@@ -3816,6 +3816,7 @@ dependencies = [
  "aws-sdk-s3",
  "common",
  "futures-util",
+ "redis",
  "tokio",
  "tracing",
 ]

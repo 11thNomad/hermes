@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use redis::{
-    streams::{StreamReadOptions, StreamReadReply},
+    streams::{StreamAutoClaimReply, StreamId, StreamReadOptions, StreamReadReply},
     Client, RedisError,
 };
 use tracing::info;
 
-use crate::models::TranscodeJob;
+use crate::models::{TranscodeDlqJob, TranscodeJob};
 
 pub async fn ensure_consumer_group(client: &Client, stream: &str, group: &str) -> Result<()> {
     let mut connection = client
@@ -60,10 +60,67 @@ pub async fn enqueue_transcode_job(
         .with_context(|| format!("failed to enqueue transcode job on stream `{stream}`"))
 }
 
+pub async fn enqueue_transcode_dlq_job(
+    client: &Client,
+    stream: &str,
+    job: &TranscodeDlqJob,
+) -> Result<String> {
+    let payload = serde_json::to_string(job).context("failed to serialize transcode DLQ job")?;
+    let mut connection = client
+        .get_multiplexed_async_connection()
+        .await
+        .context("failed to open Redis connection for DLQ enqueue")?;
+
+    redis::cmd("XADD")
+        .arg(stream)
+        .arg("*")
+        .arg("payload")
+        .arg(payload)
+        .query_async::<String>(&mut connection)
+        .await
+        .with_context(|| format!("failed to enqueue transcode DLQ job on stream `{stream}`"))
+}
+
 #[derive(Debug, Clone)]
 pub struct QueuedTranscodeJob {
     pub message_id: String,
     pub job: TranscodeJob,
+}
+
+pub async fn reclaim_transcode_job(
+    client: &Client,
+    stream: &str,
+    group: &str,
+    consumer: &str,
+    min_idle_ms: usize,
+) -> Result<Option<QueuedTranscodeJob>> {
+    let mut connection = client
+        .get_multiplexed_async_connection()
+        .await
+        .context("failed to open Redis connection for stream reclaim")?;
+
+    let reply = redis::cmd("XAUTOCLAIM")
+        .arg(stream)
+        .arg(group)
+        .arg(consumer)
+        .arg(min_idle_ms)
+        .arg("0-0")
+        .arg("COUNT")
+        .arg(1)
+        .query_async::<StreamAutoClaimReply>(&mut connection)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to reclaim transcode job from stream `{stream}` for consumer `{consumer}`"
+            )
+        })?;
+
+    reply
+        .claimed
+        .into_iter()
+        .next()
+        .map(parse_queued_job)
+        .transpose()
 }
 
 pub async fn read_transcode_job(
@@ -106,16 +163,7 @@ pub async fn read_transcode_job(
         return Ok(None);
     };
 
-    let payload = message
-        .get::<String>("payload")
-        .context("stream message is missing `payload` field")?;
-    let job = serde_json::from_str::<TranscodeJob>(&payload)
-        .context("failed to deserialize transcode job payload")?;
-
-    Ok(Some(QueuedTranscodeJob {
-        message_id: message.id,
-        job,
-    }))
+    Ok(Some(parse_queued_job(message)?))
 }
 
 pub async fn ack_transcode_job(
@@ -142,4 +190,17 @@ pub async fn ack_transcode_job(
     }
 
     Ok(())
+}
+
+fn parse_queued_job(message: StreamId) -> Result<QueuedTranscodeJob> {
+    let payload = message
+        .get::<String>("payload")
+        .context("stream message is missing `payload` field")?;
+    let job = serde_json::from_str::<TranscodeJob>(&payload)
+        .context("failed to deserialize transcode job payload")?;
+
+    Ok(QueuedTranscodeJob {
+        message_id: message.id,
+        job,
+    })
 }

@@ -18,7 +18,9 @@ pub struct AppConfig {
     pub raw_bucket: String,
     pub hls_bucket: String,
     pub transcode_stream: String,
+    pub transcode_dlq_stream: String,
     pub transcode_consumer_group: String,
+    pub transcode_max_attempts: i32,
     pub max_upload_bytes: u64,
     pub job_visibility_timeout_secs: u64,
     pub run_migrations: bool,
@@ -51,7 +53,12 @@ impl AppConfig {
             raw_bucket: read_env_with_default("MINIO_RAW_BUCKET", "videos-raw"),
             hls_bucket: read_env_with_default("MINIO_HLS_BUCKET", "videos-hls"),
             transcode_stream: read_env_with_default("TRANSCODE_STREAM", "transcode_jobs"),
+            transcode_dlq_stream: read_env_with_default(
+                "TRANSCODE_DLQ_STREAM",
+                "transcode_jobs_dlq",
+            ),
             transcode_consumer_group: read_env_with_default("TRANSCODE_CONSUMER_GROUP", "workers"),
+            transcode_max_attempts: read_parsed_env("TRANSCODE_MAX_ATTEMPTS", 3)?,
             max_upload_bytes: read_parsed_env("MAX_UPLOAD_BYTES", 1_073_741_824)?,
             job_visibility_timeout_secs: read_parsed_env("JOB_VISIBILITY_TIMEOUT_SECS", 300)?,
             run_migrations: read_bool_env("RUN_MIGRATIONS", true)?,
@@ -106,7 +113,7 @@ mod tests {
     };
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    const TEST_KEYS: [&str; 15] = [
+    const TEST_KEYS: [&str; 17] = [
         "API_BIND_ADDR",
         "BASE_URL",
         "CORS_ALLOWED_ORIGINS",
@@ -120,7 +127,9 @@ mod tests {
         "AWS_REGION",
         "MAX_UPLOAD_BYTES",
         "TRANSCODE_STREAM",
+        "TRANSCODE_DLQ_STREAM",
         "TRANSCODE_CONSUMER_GROUP",
+        "TRANSCODE_MAX_ATTEMPTS",
         "JOB_VISIBILITY_TIMEOUT_SECS",
     ];
     const EXTRA_TEST_KEYS: [&str; 3] = [
@@ -139,7 +148,9 @@ mod tests {
         assert_eq!(config.raw_bucket, "videos-raw");
         assert_eq!(config.hls_bucket, "videos-hls");
         assert_eq!(config.transcode_stream, "transcode_jobs");
+        assert_eq!(config.transcode_dlq_stream, "transcode_jobs_dlq");
         assert_eq!(config.transcode_consumer_group, "workers");
+        assert_eq!(config.transcode_max_attempts, 3);
         assert_eq!(config.max_upload_bytes, 1_073_741_824);
         assert_eq!(config.job_visibility_timeout_secs, 300);
         assert!(config.run_migrations);
@@ -167,7 +178,9 @@ mod tests {
             ("AWS_REGION", "ap-south-1"),
             ("MAX_UPLOAD_BYTES", "42"),
             ("TRANSCODE_STREAM", "jobs"),
+            ("TRANSCODE_DLQ_STREAM", "jobs_dlq"),
             ("TRANSCODE_CONSUMER_GROUP", "group"),
+            ("TRANSCODE_MAX_ATTEMPTS", "5"),
             ("JOB_VISIBILITY_TIMEOUT_SECS", "90"),
             ("RUN_MIGRATIONS", "false"),
             ("WORKER_POLL_INTERVAL_MS", "250"),
@@ -187,7 +200,9 @@ mod tests {
         assert_eq!(config.s3_region, "ap-south-1");
         assert_eq!(config.max_upload_bytes, 42);
         assert_eq!(config.transcode_stream, "jobs");
+        assert_eq!(config.transcode_dlq_stream, "jobs_dlq");
         assert_eq!(config.transcode_consumer_group, "group");
+        assert_eq!(config.transcode_max_attempts, 5);
         assert_eq!(config.job_visibility_timeout_secs, 90);
         assert!(!config.run_migrations);
         assert_eq!(config.worker_poll_interval_ms, 250);

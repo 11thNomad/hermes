@@ -112,3 +112,15 @@ pub struct TranscodeJob {
     pub output_bucket: String,
     pub output_prefix: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscodeDlqJob {
+    pub video_id: Uuid,
+    pub source_bucket: String,
+    pub source_key: String,
+    pub output_bucket: String,
+    pub output_prefix: String,
+    pub error_msg: String,
+    pub attempt_count: i32,
+    pub original_message_id: String,
+}

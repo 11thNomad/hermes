@@ -9,5 +9,6 @@ anyhow.workspace = true
 aws-sdk-s3.workspace = true
 common = { path = "../common" }
 futures-util.workspace = true
+redis.workspace = true
 tokio.workspace = true
 tracing.workspace = true

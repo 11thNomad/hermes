@@ -88,6 +88,7 @@ pub async fn mark_video_processing(pool: &PgPool, id: Uuid) -> Result<VideoRecor
         SET
             status = $2,
             error_msg = NULL,
+            hls_manifest_key = NULL,
             attempt_count = attempt_count + 1
         WHERE id = $1
         RETURNING
@@ -108,6 +109,39 @@ pub async fn mark_video_processing(pool: &PgPool, id: Uuid) -> Result<VideoRecor
     .fetch_optional(pool)
     .await
     .with_context(|| format!("failed to mark video `{id}` as processing"))?;
+
+    let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
+    map_video_row(row)
+}
+
+pub async fn mark_video_pending(pool: &PgPool, id: Uuid, error_msg: &str) -> Result<VideoRecord> {
+    let row = sqlx::query(
+        r#"
+        UPDATE videos
+        SET
+            status = $2,
+            error_msg = $3,
+            hls_manifest_key = NULL
+        WHERE id = $1
+        RETURNING
+            id,
+            filename,
+            mime_type,
+            size_bytes,
+            status,
+            raw_key,
+            hls_manifest_key,
+            error_msg,
+            detected_format,
+            attempt_count
+        "#,
+    )
+    .bind(id)
+    .bind(VideoStatus::Pending.as_str())
+    .bind(error_msg)
+    .fetch_optional(pool)
+    .await
+    .with_context(|| format!("failed to mark video `{id}` as pending"))?;
 
     let row = row.ok_or_else(|| anyhow!("video `{id}` was not found"))?;
     map_video_row(row)
@@ -156,6 +190,7 @@ pub async fn mark_video_failed(pool: &PgPool, id: Uuid, error_msg: &str) -> Resu
         UPDATE videos
         SET
             status = $2,
+            hls_manifest_key = NULL,
             error_msg = $3
         WHERE id = $1
         RETURNING

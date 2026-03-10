@@ -4,18 +4,24 @@ mod transcode;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result};
 use common::{
-    db::{mark_video_failed, mark_video_processing, mark_video_ready},
+    db::{mark_video_failed, mark_video_pending, mark_video_processing, mark_video_ready},
     init_tracing, initialize,
-    queue::{ack_transcode_job, read_transcode_job, QueuedTranscodeJob},
+    models::TranscodeDlqJob,
+    queue::{
+        ack_transcode_job, enqueue_transcode_dlq_job, enqueue_transcode_job, read_transcode_job,
+        reclaim_transcode_job, QueuedTranscodeJob,
+    },
     storage::{get_object, hls_manifest_key, put_object_path},
 };
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
+    time::sleep,
 };
 use tracing::{info, warn};
 
@@ -30,22 +36,17 @@ async fn main() -> Result<()> {
     let consumer = consumer_name();
     info!(
         stream = %config.transcode_stream,
+        dlq_stream = %config.transcode_dlq_stream,
         group = %config.transcode_consumer_group,
         consumer = %consumer,
         poll_interval_ms = config.worker_poll_interval_ms,
+        visibility_timeout_secs = config.job_visibility_timeout_secs,
+        max_attempts = config.transcode_max_attempts,
         "worker bootstrap complete"
     );
 
     loop {
-        match read_transcode_job(
-            &services.redis,
-            &config.transcode_stream,
-            &config.transcode_consumer_group,
-            &consumer,
-            config.worker_poll_interval_ms as usize,
-        )
-        .await
-        {
+        match next_transcode_job(&services.redis, &config, &consumer).await {
             Ok(Some(queued_job)) => {
                 if let Err(error) = process_job(&services, &config, queued_job).await {
                     warn!(error = %error, "worker failed to process transcode job");
@@ -53,7 +54,7 @@ async fn main() -> Result<()> {
             }
             Ok(None) => {}
             Err(error) => {
-                warn!(error = %error, "worker failed to read transcode job");
+                warn!(error = %error, "worker failed to fetch transcode job");
             }
         }
     }
@@ -62,6 +63,38 @@ async fn main() -> Result<()> {
 fn consumer_name() -> String {
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "worker".to_owned());
     format!("{hostname}-{}", std::process::id())
+}
+
+async fn next_transcode_job(
+    redis: &redis::Client,
+    config: &common::AppConfig,
+    consumer: &str,
+) -> Result<Option<QueuedTranscodeJob>> {
+    if let Some(queued_job) = reclaim_transcode_job(
+        redis,
+        &config.transcode_stream,
+        &config.transcode_consumer_group,
+        consumer,
+        config.job_visibility_timeout_secs.saturating_mul(1000) as usize,
+    )
+    .await?
+    {
+        info!(
+            message_id = %queued_job.message_id,
+            video_id = %queued_job.job.video_id,
+            "worker reclaimed stale transcode job"
+        );
+        return Ok(Some(queued_job));
+    }
+
+    read_transcode_job(
+        redis,
+        &config.transcode_stream,
+        &config.transcode_consumer_group,
+        consumer,
+        config.worker_poll_interval_ms as usize,
+    )
+    .await
 }
 
 async fn process_job(
@@ -85,13 +118,18 @@ async fn process_job(
         .map_err(anyhow::Error::from)
         .with_context(|| format!("failed to create worker temp dir `{}`", job_dir.display()))?;
     let source_path = job_dir.join("source");
-    download_source_object(
+
+    if let Err(error) = download_source_object(
         services,
         &queued_job.job.source_bucket,
         &queued_job.job.source_key,
         &source_path,
     )
-    .await?;
+    .await
+    {
+        cleanup_temp_dir(&job_dir).await;
+        return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error).await;
+    }
 
     match probe::validate_media(&source_path).await? {
         probe::ProbeOutcome::Valid => {
@@ -134,31 +172,7 @@ async fn process_job(
     if let Err(error) = transcode_and_upload(services, &queued_job, &source_path, &output_dir).await
     {
         cleanup_temp_dir(&job_dir).await;
-        let message = truncate_error(&error.to_string(), 512);
-        let video = mark_video_failed(&services.db, queued_job.job.video_id, &message).await?;
-        warn!(
-            message_id = %queued_job.message_id,
-            video_id = %video.id,
-            status = %video.status.as_str(),
-            error = %message,
-            "worker HLS generation failed"
-        );
-
-        ack_transcode_job(
-            &services.redis,
-            &config.transcode_stream,
-            &config.transcode_consumer_group,
-            &queued_job.message_id,
-        )
-        .await?;
-
-        info!(
-            message_id = %queued_job.message_id,
-            video_id = %queued_job.job.video_id,
-            "worker acknowledged failed transcode job"
-        );
-
-        return Ok(());
+        return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error).await;
     }
 
     let manifest_key = hls_manifest_key(queued_job.job.video_id);
@@ -286,6 +300,92 @@ async fn upload_hls_outputs(
     Ok(())
 }
 
+async fn retry_or_dlq_job(
+    services: &common::SharedServices,
+    config: &common::AppConfig,
+    queued_job: &QueuedTranscodeJob,
+    attempt_count: i32,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let message = truncate_error(&error.to_string(), 512);
+
+    match retry_backoff(attempt_count, config.transcode_max_attempts) {
+        Some(backoff) => {
+            let video = mark_video_pending(&services.db, queued_job.job.video_id, &message).await?;
+            warn!(
+                message_id = %queued_job.message_id,
+                video_id = %video.id,
+                status = %video.status.as_str(),
+                attempt_count = video.attempt_count,
+                retry_in_secs = backoff.as_secs(),
+                error = %message,
+                "worker transient failure; scheduling retry"
+            );
+
+            sleep(backoff).await;
+            enqueue_transcode_job(&services.redis, &config.transcode_stream, &queued_job.job)
+                .await?;
+            ack_transcode_job(
+                &services.redis,
+                &config.transcode_stream,
+                &config.transcode_consumer_group,
+                &queued_job.message_id,
+            )
+            .await?;
+
+            info!(
+                message_id = %queued_job.message_id,
+                video_id = %queued_job.job.video_id,
+                attempt_count,
+                "worker re-enqueued transient transcode job"
+            );
+
+            Ok(())
+        }
+        None => {
+            let dlq_job = TranscodeDlqJob {
+                video_id: queued_job.job.video_id,
+                source_bucket: queued_job.job.source_bucket.clone(),
+                source_key: queued_job.job.source_key.clone(),
+                output_bucket: queued_job.job.output_bucket.clone(),
+                output_prefix: queued_job.job.output_prefix.clone(),
+                error_msg: message.clone(),
+                attempt_count,
+                original_message_id: queued_job.message_id.clone(),
+            };
+
+            enqueue_transcode_dlq_job(&services.redis, &config.transcode_dlq_stream, &dlq_job)
+                .await?;
+            let video = mark_video_failed(&services.db, queued_job.job.video_id, &message).await?;
+            warn!(
+                message_id = %queued_job.message_id,
+                video_id = %video.id,
+                status = %video.status.as_str(),
+                attempt_count = video.attempt_count,
+                dlq_stream = %config.transcode_dlq_stream,
+                error = %message,
+                "worker exhausted transient retries; moved job to DLQ"
+            );
+
+            ack_transcode_job(
+                &services.redis,
+                &config.transcode_stream,
+                &config.transcode_consumer_group,
+                &queued_job.message_id,
+            )
+            .await?;
+
+            info!(
+                message_id = %queued_job.message_id,
+                video_id = %queued_job.job.video_id,
+                "worker acknowledged DLQ transcode job"
+            );
+
+            Ok(())
+        }
+    }
+}
+
 fn hls_content_type(path: &Path) -> &'static str {
     match path.extension().and_then(|value| value.to_str()) {
         Some("m3u8") => "application/vnd.apple.mpegurl",
@@ -305,4 +405,28 @@ fn truncate_error(value: &str, max_len: usize) -> String {
         .collect::<String>();
     truncated.push_str("...");
     truncated
+}
+
+fn retry_backoff(attempt_count: i32, max_attempts: i32) -> Option<Duration> {
+    if attempt_count >= max_attempts {
+        return None;
+    }
+
+    match attempt_count {
+        1 => Some(Duration::from_secs(5)),
+        2 => Some(Duration::from_secs(15)),
+        _ => Some(Duration::from_secs(15)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_backoff_matches_phase3_schedule() {
+        assert_eq!(retry_backoff(1, 3), Some(Duration::from_secs(5)));
+        assert_eq!(retry_backoff(2, 3), Some(Duration::from_secs(15)));
+        assert_eq!(retry_backoff(3, 3), None);
+    }
 }
