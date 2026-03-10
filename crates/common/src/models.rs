@@ -104,6 +104,14 @@ pub struct VideoStatusResponse {
     pub error_msg: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, ToSchema)]
+pub struct VideoListItem {
+    pub id: Uuid,
+    pub filename: String,
+    pub status: VideoStatus,
+    pub size_bytes: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscodeJob {
     pub video_id: Uuid,

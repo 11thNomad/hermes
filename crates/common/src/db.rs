@@ -2,7 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-use crate::models::{DetectedFormat, VideoRecord, VideoStatus};
+use crate::models::{DetectedFormat, VideoListItem, VideoRecord, VideoStatus};
 
 #[derive(Debug, Clone)]
 pub struct NewVideo {
@@ -79,6 +79,27 @@ pub async fn get_video(pool: &PgPool, id: Uuid) -> Result<Option<VideoRecord>> {
     .with_context(|| format!("failed to load video `{id}`"))?;
 
     row.map(map_video_row).transpose()
+}
+
+pub async fn list_recent_videos(pool: &PgPool, limit: i64) -> Result<Vec<VideoListItem>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            id,
+            filename,
+            status,
+            size_bytes
+        FROM videos
+        ORDER BY created_at DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("failed to list recent videos")?;
+
+    rows.into_iter().map(map_video_list_row).collect()
 }
 
 pub async fn mark_video_processing(pool: &PgPool, id: Uuid) -> Result<VideoRecord> {
@@ -272,5 +293,17 @@ fn map_video_row(row: sqlx::postgres::PgRow) -> Result<VideoRecord> {
         detected_format: DetectedFormat::parse(&detected_format)
             .ok_or_else(|| anyhow!("unknown detected format `{detected_format}`"))?,
         attempt_count: row.get("attempt_count"),
+    })
+}
+
+fn map_video_list_row(row: sqlx::postgres::PgRow) -> Result<VideoListItem> {
+    let status = row.get::<String, _>("status");
+
+    Ok(VideoListItem {
+        id: row.get("id"),
+        filename: row.get("filename"),
+        status: VideoStatus::parse(&status)
+            .ok_or_else(|| anyhow!("unknown video status `{status}`"))?,
+        size_bytes: row.get("size_bytes"),
     })
 }

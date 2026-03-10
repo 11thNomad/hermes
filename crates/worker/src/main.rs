@@ -4,7 +4,7 @@ mod transcode;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
@@ -119,7 +119,8 @@ async fn process_job(
         .with_context(|| format!("failed to create worker temp dir `{}`", job_dir.display()))?;
     let source_path = job_dir.join("source");
 
-    if let Err(error) = download_source_object(
+    let download_started_at = Instant::now();
+    let source_size_bytes = match download_source_object(
         services,
         &queued_job.job.source_bucket,
         &queued_job.job.source_key,
@@ -127,9 +128,20 @@ async fn process_job(
     )
     .await
     {
-        cleanup_temp_dir(&job_dir).await;
-        return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error).await;
-    }
+        Ok(size_bytes) => size_bytes,
+        Err(error) => {
+            cleanup_temp_dir(&job_dir).await;
+            return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error)
+                .await;
+        }
+    };
+    info!(
+        message_id = %queued_job.message_id,
+        video_id = %queued_job.job.video_id,
+        size_bytes = source_size_bytes,
+        elapsed_ms = download_started_at.elapsed().as_millis(),
+        "worker downloaded source object"
+    );
 
     match probe::validate_media(&source_path).await? {
         probe::ProbeOutcome::Valid => {
@@ -169,11 +181,36 @@ async fn process_job(
     }
 
     let output_dir = job_dir.join("hls");
-    if let Err(error) = transcode_and_upload(services, &queued_job, &source_path, &output_dir).await
-    {
-        cleanup_temp_dir(&job_dir).await;
-        return retry_or_dlq_job(services, config, &queued_job, video.attempt_count, &error).await;
-    }
+    let processing_started_at = Instant::now();
+    info!(
+        message_id = %queued_job.message_id,
+        video_id = %queued_job.job.video_id,
+        source_size_bytes,
+        "worker starting HLS transcode"
+    );
+    let upload_summary =
+        match transcode_and_upload(services, &queued_job, &source_path, &output_dir).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                cleanup_temp_dir(&job_dir).await;
+                return retry_or_dlq_job(
+                    services,
+                    config,
+                    &queued_job,
+                    video.attempt_count,
+                    &error,
+                )
+                .await;
+            }
+        };
+    info!(
+        message_id = %queued_job.message_id,
+        video_id = %queued_job.job.video_id,
+        asset_count = upload_summary.asset_count,
+        total_upload_bytes = upload_summary.total_upload_bytes,
+        elapsed_ms = processing_started_at.elapsed().as_millis(),
+        "worker completed HLS transcode and upload"
+    );
 
     let manifest_key = hls_manifest_key(queued_job.job.video_id);
     let video = mark_video_ready(&services.db, queued_job.job.video_id, &manifest_key).await?;
@@ -213,15 +250,17 @@ async fn download_source_object(
     bucket: &str,
     key: &str,
     destination: &PathBuf,
-) -> Result<()> {
+) -> Result<u64> {
     let object = get_object(&services.s3, bucket, key, None).await?;
     let mut file = File::create(destination)
         .await
         .map_err(anyhow::Error::from)
         .with_context(|| format!("failed to create temp file `{}`", destination.display()))?;
     let mut body = object.body;
+    let mut total_bytes = 0_u64;
 
     while let Some(chunk) = body.try_next().await? {
+        total_bytes += chunk.len() as u64;
         file.write_all(&chunk)
             .await
             .map_err(anyhow::Error::from)
@@ -233,7 +272,7 @@ async fn download_source_object(
         .map_err(anyhow::Error::from)
         .with_context(|| format!("failed to flush temp file `{}`", destination.display()))?;
 
-    Ok(())
+    Ok(total_bytes)
 }
 
 async fn cleanup_temp_dir(path: &PathBuf) {
@@ -249,8 +288,15 @@ async fn transcode_and_upload(
     queued_job: &QueuedTranscodeJob,
     source_path: &Path,
     output_dir: &Path,
-) -> Result<()> {
+) -> Result<UploadSummary> {
+    let transcode_started_at = Instant::now();
     transcode::transcode_to_hls(source_path, output_dir).await?;
+    info!(
+        message_id = %queued_job.message_id,
+        video_id = %queued_job.job.video_id,
+        elapsed_ms = transcode_started_at.elapsed().as_millis(),
+        "worker finished ffmpeg transcode; starting HLS upload"
+    );
     upload_hls_outputs(
         &services.s3,
         &queued_job.job.output_bucket,
@@ -265,13 +311,15 @@ async fn upload_hls_outputs(
     bucket: &str,
     output_prefix: &str,
     output_dir: &Path,
-) -> Result<()> {
+) -> Result<UploadSummary> {
     let mut entries = fs::read_dir(output_dir)
         .await
         .map_err(anyhow::Error::from)
         .with_context(|| format!("failed to read HLS output dir `{}`", output_dir.display()))?;
     let prefix = Arc::new(output_prefix.to_owned());
     let bucket = Arc::new(bucket.to_owned());
+    let mut asset_count = 0_usize;
+    let mut total_upload_bytes = 0_u64;
 
     while let Some(entry) = entries
         .next_entry()
@@ -293,11 +341,21 @@ async fn upload_hls_outputs(
         let file_name = file_name.to_string_lossy();
         let object_key = format!("{}/{}", prefix, file_name);
         let content_type = hls_content_type(&path);
+        let metadata = entry
+            .metadata()
+            .await
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to read metadata for `{}`", path.display()))?;
         put_object_path(client, &bucket, &object_key, content_type, &path).await?;
+        asset_count += 1;
+        total_upload_bytes += metadata.len();
         info!(bucket = %bucket, key = %object_key, "worker uploaded HLS asset");
     }
 
-    Ok(())
+    Ok(UploadSummary {
+        asset_count,
+        total_upload_bytes,
+    })
 }
 
 async fn retry_or_dlq_job(
@@ -417,6 +475,11 @@ fn retry_backoff(attempt_count: i32, max_attempts: i32) -> Option<Duration> {
         2 => Some(Duration::from_secs(15)),
         _ => Some(Duration::from_secs(15)),
     }
+}
+
+struct UploadSummary {
+    asset_count: usize,
+    total_upload_bytes: u64,
 }
 
 #[cfg(test)]

@@ -4,13 +4,13 @@ use aws_sdk_s3::primitives::ByteStream;
 use axum::{
     extract::{DefaultBodyLimit, Multipart, State},
     http::{header::CONTENT_LENGTH, HeaderMap, StatusCode},
-    routing::post,
+    routing::get,
     Json, Router,
 };
 use common::{
-    db::{delete_video, insert_video, NewVideo},
+    db::{delete_video, insert_video, list_recent_videos, NewVideo},
     media::{detect_format, sanitize_filename, MAX_SNIFF_BYTES},
-    models::{TranscodeJob, UploadVideoResponse, VideoStatus},
+    models::{TranscodeJob, UploadVideoResponse, VideoListItem, VideoStatus},
     queue::enqueue_transcode_job,
     storage::{delete_object, hls_output_prefix, put_object_stream, raw_object_key},
 };
@@ -27,8 +27,24 @@ const MULTIPART_OVERHEAD_GRACE_BYTES: u64 = 64 * 1024;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/videos", post(upload_video))
+        .route("/api/videos", get(list_videos).post(upload_video))
         .layer(DefaultBodyLimit::disable())
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/videos",
+    tag = "videos",
+    responses(
+        (status = 200, description = "Recent uploaded videos", body = [VideoListItem]),
+        (status = 500, description = "Internal server error", body = crate::routes::ErrorResponse)
+    )
+)]
+pub(crate) async fn list_videos(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<VideoListItem>>, ApiError> {
+    let videos = list_recent_videos(&state.services.db, 25).await?;
+    Ok(Json(videos))
 }
 
 #[utoipa::path(

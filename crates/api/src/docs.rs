@@ -1,5 +1,5 @@
 use axum::Router;
-use common::models::{UploadVideoResponse, VideoRecord, VideoStatusResponse};
+use common::models::{UploadVideoResponse, VideoListItem, VideoRecord, VideoStatusResponse};
 use utoipa::{OpenApi, ToSchema};
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -12,6 +12,7 @@ use crate::state::AppState;
         crate::routes::health::healthcheck,
         crate::routes::health::api_healthcheck,
         crate::routes::upload::upload_video,
+        crate::routes::upload::list_videos,
         crate::routes::status::video_status,
         crate::routes::events::video_events,
         crate::routes::hls::stream_hls_asset,
@@ -22,6 +23,7 @@ use crate::state::AppState;
             crate::routes::ErrorResponse,
             crate::routes::health::HealthResponse,
             UploadVideoResponse,
+            VideoListItem,
             VideoRecord,
             VideoStatusResponse,
             UploadVideoRequest

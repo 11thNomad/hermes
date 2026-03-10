@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { page } from '$app/stores';
   import WatchPortal from '$lib/components/WatchPortal.svelte';
 </script>
 
@@ -7,4 +6,4 @@
   <title>Hermes | Watch</title>
 </svelte:head>
 
-<WatchPortal routeVideoId={$page.params.id ?? ''} />
+<WatchPortal routeVideoId="" />

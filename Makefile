@@ -9,6 +9,15 @@ bootstrap:
 dev:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
 
+stop:
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml stop
+
+restart:
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml restart
+
+down:
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+
 build:
 	docker compose build
 
@@ -38,4 +47,4 @@ logs:
 	docker compose logs -f api worker frontend
 
 clean:
-	docker compose down -v --remove-orphans
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
