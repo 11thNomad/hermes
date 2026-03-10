@@ -55,9 +55,24 @@ Development compose stack:
 make dev
 ```
 
-`make dev` now uses hot reload:
+`make dev` now matches the recommended local workflow:
 - `api` and `worker` run through `cargo-watch` with polling inside the dev containers
-- `frontend` runs Vite dev server on `http://localhost:5173`
+- Postgres, Redis, and MinIO stay in Docker
+- the frontend is intended to run on the host for the most reliable Vite hot reload
+
+Run the frontend in a second terminal:
+```bash
+make frontend-dev
+```
+
+That gives you:
+- backend and infra in Docker
+- frontend Vite dev server on the host at `http://localhost:5173`
+
+If you want the previous all-Docker dev flow, it is still available:
+```bash
+make dev-full
+```
 
 Production-style image build:
 ```bash
@@ -144,7 +159,7 @@ Or inspect the full compose stack:
 docker compose logs -f
 ```
 
-When using the dev stack, Rust rebuild/restart activity will show up in the API and worker logs because `cargo-watch` restarts those processes on source changes.
+When using the recommended dev flow, `make logs` follows only the API and worker containers because the frontend is running on the host.
 
 The API and worker now emit useful startup and bootstrap logs, including:
 - migration execution

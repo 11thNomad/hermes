@@ -1,13 +1,19 @@
 SHELL := /bin/bash
 
-.PHONY: bootstrap dev build check lint fmt test smoke-phase1 smoke-upload logs clean
+.PHONY: bootstrap dev dev-full frontend-dev build check lint fmt test smoke-phase1 smoke-upload logs clean
 
 bootstrap:
 	cp -n .env.example .env || true
 	cd frontend && npm install
 
 dev:
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build postgres redis minio api worker
+
+dev-full:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+frontend-dev:
+	cd frontend && npm run dev
 
 stop:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml stop
@@ -44,7 +50,7 @@ smoke-upload:
 	bash scripts/upload_smoke.sh
 
 logs:
-	docker compose logs -f api worker frontend
+	docker compose logs -f api worker
 
 clean:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml down -v --remove-orphans
