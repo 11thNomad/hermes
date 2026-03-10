@@ -1,15 +1,26 @@
-use anyhow::Result;
+mod probe;
+
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use common::{
-    db::{mark_video_processing, mark_video_ready},
+    db::{mark_video_failed, mark_video_processing, mark_video_ready},
     init_tracing, initialize,
     queue::{ack_transcode_job, read_transcode_job, QueuedTranscodeJob},
+    storage::get_object,
 };
-use tokio::time::{sleep, Duration};
+use tokio::{
+    fs::{self, File},
+    io::AsyncWriteExt,
+    time::{sleep, Duration},
+};
 use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
+
+    probe::ensure_probe_available()?;
 
     let (config, services) = initialize("worker").await?;
     let consumer = consumer_name();
@@ -64,10 +75,57 @@ async fn process_job(
         "worker consumed transcode job"
     );
 
+    let temp_path = worker_temp_path(&queued_job.message_id);
+    download_source_object(
+        services,
+        &queued_job.job.source_bucket,
+        &queued_job.job.source_key,
+        &temp_path,
+    )
+    .await?;
+
+    match probe::validate_media(&temp_path).await? {
+        probe::ProbeOutcome::Valid => {
+            info!(
+                message_id = %queued_job.message_id,
+                video_id = %video.id,
+                "worker ffprobe validation passed"
+            );
+        }
+        probe::ProbeOutcome::InvalidMedia { message } => {
+            cleanup_temp_file(&temp_path).await;
+            let video = mark_video_failed(&services.db, queued_job.job.video_id, &message).await?;
+            warn!(
+                message_id = %queued_job.message_id,
+                video_id = %video.id,
+                status = %video.status.as_str(),
+                error = %message,
+                "worker rejected invalid media"
+            );
+
+            ack_transcode_job(
+                &services.redis,
+                &config.transcode_stream,
+                &config.transcode_consumer_group,
+                &queued_job.message_id,
+            )
+            .await?;
+
+            info!(
+                message_id = %queued_job.message_id,
+                video_id = %queued_job.job.video_id,
+                "worker acknowledged failed transcode job"
+            );
+
+            return Ok(());
+        }
+    }
+
     sleep(Duration::from_secs(1)).await;
 
     let manifest_key = format!("{}/index.m3u8", queued_job.job.output_prefix);
     let video = mark_video_ready(&services.db, queued_job.job.video_id, &manifest_key).await?;
+    cleanup_temp_file(&temp_path).await;
     info!(
         message_id = %queued_job.message_id,
         video_id = %video.id,
@@ -91,4 +149,45 @@ async fn process_job(
     );
 
     Ok(())
+}
+
+fn worker_temp_path(message_id: &str) -> PathBuf {
+    let sanitized = message_id.replace(['/', '\\', ':'], "_");
+    std::env::temp_dir().join(format!("hermes-worker-{sanitized}"))
+}
+
+async fn download_source_object(
+    services: &common::SharedServices,
+    bucket: &str,
+    key: &str,
+    destination: &PathBuf,
+) -> Result<()> {
+    let object = get_object(&services.s3, bucket, key, None).await?;
+    let mut file = File::create(destination)
+        .await
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to create temp file `{}`", destination.display()))?;
+    let mut body = object.body;
+
+    while let Some(chunk) = body.try_next().await? {
+        file.write_all(&chunk)
+            .await
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to write temp file `{}`", destination.display()))?;
+    }
+
+    file.flush()
+        .await
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("failed to flush temp file `{}`", destination.display()))?;
+
+    Ok(())
+}
+
+async fn cleanup_temp_file(path: &PathBuf) {
+    if let Err(error) = fs::remove_file(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            warn!(path = %path.display(), error = %error, "failed to remove worker temp file");
+        }
+    }
 }

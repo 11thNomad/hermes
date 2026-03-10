@@ -1,5 +1,8 @@
 FROM rust:1.94-bookworm AS chef
 WORKDIR /workspace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked \
     && cargo install cargo-watch --locked
 
@@ -18,7 +21,7 @@ WORKDIR /workspace
 
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /workspace/target/release/worker /usr/local/bin/worker
 CMD ["worker"]
