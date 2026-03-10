@@ -14,6 +14,7 @@ use crate::state::AppState;
         crate::routes::upload::upload_video,
         crate::routes::status::video_status,
         crate::routes::events::video_events,
+        crate::routes::hls::stream_hls_asset,
         crate::routes::stream::stream_video
     ),
     components(

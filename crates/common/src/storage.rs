@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::{Context, Result};
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
@@ -103,6 +105,20 @@ pub async fn put_object_stream(
         .with_context(|| format!("failed to upload object `{bucket}/{key}`"))?;
 
     Ok(())
+}
+
+pub async fn put_object_path(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    content_type: &str,
+    path: &Path,
+) -> Result<()> {
+    let body = ByteStream::from_path(path)
+        .await
+        .with_context(|| format!("failed to open object source `{}`", path.display()))?;
+
+    put_object_stream(client, bucket, key, content_type, body).await
 }
 
 pub async fn get_object(

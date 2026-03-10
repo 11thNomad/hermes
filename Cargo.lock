@@ -3813,6 +3813,7 @@ name = "worker"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-sdk-s3",
  "common",
  "futures-util",
  "tokio",
