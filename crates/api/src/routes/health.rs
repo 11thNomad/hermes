@@ -125,6 +125,7 @@ mod tests {
                 database_url: "postgres://postgres:postgres@localhost/hermes".to_owned(),
                 redis_url: "redis://127.0.0.1:6379".to_owned(),
                 s3_endpoint: "http://127.0.0.1:9000".to_owned(),
+                s3_public_endpoint: "http://localhost:9000".to_owned(),
                 s3_region: "us-east-1".to_owned(),
                 s3_access_key: "minioadmin".to_owned(),
                 s3_secret_key: "minioadmin".to_owned(),
@@ -144,6 +145,7 @@ mod tests {
                 db: test_pool(),
                 redis: RedisClient::open("redis://127.0.0.1:6379").unwrap(),
                 s3: test_s3_client(),
+                s3_public: test_s3_client(),
             },
         }
     }

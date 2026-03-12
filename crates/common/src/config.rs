@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub database_url: String,
     pub redis_url: String,
     pub s3_endpoint: String,
+    pub s3_public_endpoint: String,
     pub s3_region: String,
     pub s3_access_key: String,
     pub s3_secret_key: String,
@@ -47,6 +48,10 @@ impl AppConfig {
             database_url: read_env("DATABASE_URL")?,
             redis_url: read_env("REDIS_URL")?,
             s3_endpoint: read_env("MINIO_ENDPOINT")?,
+            s3_public_endpoint: read_env_with_default(
+                "MINIO_PUBLIC_ENDPOINT",
+                "http://localhost:9000",
+            ),
             s3_region: read_env_with_default("AWS_REGION", "us-east-1"),
             s3_access_key: read_env("MINIO_ACCESS_KEY")?,
             s3_secret_key: read_env("MINIO_SECRET_KEY")?,
@@ -113,13 +118,14 @@ mod tests {
     };
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    const TEST_KEYS: [&str; 17] = [
+    const TEST_KEYS: [&str; 18] = [
         "API_BIND_ADDR",
         "BASE_URL",
         "CORS_ALLOWED_ORIGINS",
         "DATABASE_URL",
         "REDIS_URL",
         "MINIO_ENDPOINT",
+        "MINIO_PUBLIC_ENDPOINT",
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
         "MINIO_RAW_BUCKET",
@@ -147,6 +153,7 @@ mod tests {
         assert_eq!(config.app_name, "api");
         assert_eq!(config.raw_bucket, "videos-raw");
         assert_eq!(config.hls_bucket, "videos-hls");
+        assert_eq!(config.s3_public_endpoint, "http://localhost:9000");
         assert_eq!(config.transcode_stream, "transcode_jobs");
         assert_eq!(config.transcode_dlq_stream, "transcode_jobs_dlq");
         assert_eq!(config.transcode_consumer_group, "workers");
@@ -175,6 +182,7 @@ mod tests {
             ),
             ("MINIO_RAW_BUCKET", "raw-test"),
             ("MINIO_HLS_BUCKET", "hls-test"),
+            ("MINIO_PUBLIC_ENDPOINT", "http://127.0.0.1:9000"),
             ("AWS_REGION", "ap-south-1"),
             ("MAX_UPLOAD_BYTES", "42"),
             ("TRANSCODE_STREAM", "jobs"),
@@ -197,6 +205,7 @@ mod tests {
         );
         assert_eq!(config.raw_bucket, "raw-test");
         assert_eq!(config.hls_bucket, "hls-test");
+        assert_eq!(config.s3_public_endpoint, "http://127.0.0.1:9000");
         assert_eq!(config.s3_region, "ap-south-1");
         assert_eq!(config.max_upload_bytes, 42);
         assert_eq!(config.transcode_stream, "jobs");

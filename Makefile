@@ -22,7 +22,7 @@ restart:
 	docker compose -f docker-compose.yml -f docker-compose.dev.yml restart
 
 down:
-	docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+	docker compose -f docker-compose.yml -f docker-compose.dev.yml down --remove-orphans
 
 build:
 	docker compose build

@@ -11,6 +11,8 @@ use crate::state::AppState;
         crate::routes::health::root,
         crate::routes::health::healthcheck,
         crate::routes::health::api_healthcheck,
+        crate::routes::upload::init_direct_upload,
+        crate::routes::upload::complete_direct_upload,
         crate::routes::upload::upload_video,
         crate::routes::upload::list_videos,
         crate::routes::status::video_status,
@@ -26,6 +28,9 @@ use crate::state::AppState;
             VideoListItem,
             VideoRecord,
             VideoStatusResponse,
+            crate::routes::upload::DirectUploadInitRequest,
+            crate::routes::upload::DirectUploadInitResponse,
+            crate::routes::upload::DirectUploadCompleteRequest,
             UploadVideoRequest
         )
     ),

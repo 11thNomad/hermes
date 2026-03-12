@@ -7,7 +7,7 @@ use tracing::info;
 use crate::{
     config::AppConfig,
     queue::ensure_consumer_group,
-    storage::{build_s3_client, ensure_bucket},
+    storage::{build_public_s3_client, build_s3_client, ensure_bucket},
 };
 
 static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
@@ -17,6 +17,7 @@ pub struct SharedServices {
     pub db: PgPool,
     pub redis: RedisClient,
     pub s3: S3Client,
+    pub s3_public: S3Client,
 }
 
 pub async fn initialize(app_name: &str) -> Result<(AppConfig, SharedServices)> {
@@ -26,15 +27,25 @@ pub async fn initialize(app_name: &str) -> Result<(AppConfig, SharedServices)> {
         database_url = %config.database_url,
         redis_url = %config.redis_url,
         s3_endpoint = %config.s3_endpoint,
+        s3_public_endpoint = %config.s3_public_endpoint,
         "initializing shared services"
     );
     let db = connect_database(&config).await?;
     let redis = RedisClient::open(config.redis_url.clone()).context("invalid REDIS_URL")?;
     let s3 = build_s3_client(&config).await?;
+    let s3_public = build_public_s3_client(&config).await?;
 
     bootstrap(&config, &db, &redis, &s3).await?;
 
-    Ok((config, SharedServices { db, redis, s3 }))
+    Ok((
+        config,
+        SharedServices {
+            db,
+            redis,
+            s3,
+            s3_public,
+        },
+    ))
 }
 
 async fn connect_database(config: &AppConfig) -> Result<PgPool> {

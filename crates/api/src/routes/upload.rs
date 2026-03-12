@@ -1,10 +1,10 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use aws_sdk_s3::primitives::ByteStream;
 use axum::{
-    extract::{DefaultBodyLimit, Multipart, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{header::CONTENT_LENGTH, HeaderMap, StatusCode},
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use common::{
@@ -12,23 +12,49 @@ use common::{
     media::{detect_format, sanitize_filename, MAX_SNIFF_BYTES},
     models::{TranscodeJob, UploadVideoResponse, VideoListItem, VideoStatus},
     queue::enqueue_transcode_job,
-    storage::{delete_object, hls_output_prefix, put_object_stream, raw_object_key},
+    storage::{
+        copy_object, delete_object, get_object_bytes, head_object, hls_output_prefix,
+        incoming_object_key, presign_put_object, put_object_stream, raw_object_key,
+    },
 };
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
 };
 use tracing::{info, warn};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{routes::ApiError, state::AppState};
 
 const MULTIPART_OVERHEAD_GRACE_BYTES: u64 = 64 * 1024;
+const DIRECT_UPLOAD_URL_TTL_SECS: u64 = 15 * 60;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/videos", get(list_videos).post(upload_video))
+        .route("/api/uploads/init", post(init_direct_upload))
+        .route("/api/uploads/:id/complete", post(complete_direct_upload))
         .layer(DefaultBodyLimit::disable())
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct DirectUploadInitRequest {
+    pub(crate) filename: String,
+    pub(crate) size_bytes: u64,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub(crate) struct DirectUploadInitResponse {
+    pub(crate) video_id: Uuid,
+    pub(crate) upload_url: String,
+    pub(crate) shareable_url: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub(crate) struct DirectUploadCompleteRequest {
+    pub(crate) filename: String,
 }
 
 #[utoipa::path(
@@ -49,12 +75,196 @@ pub(crate) async fn list_videos(
 
 #[utoipa::path(
     post,
+    path = "/api/uploads/init",
+    tag = "videos",
+    request_body = DirectUploadInitRequest,
+    responses(
+        (status = 200, description = "Direct upload session initialized", body = DirectUploadInitResponse),
+        (status = 400, description = "Invalid upload request", body = crate::routes::ErrorResponse),
+        (status = 413, description = "Upload too large", body = crate::routes::ErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::routes::ErrorResponse)
+    )
+)]
+pub(crate) async fn init_direct_upload(
+    State(state): State<AppState>,
+    Json(payload): Json<DirectUploadInitRequest>,
+) -> Result<Json<DirectUploadInitResponse>, ApiError> {
+    if payload.size_bytes == 0 {
+        return Err(ApiError::BadRequest("video file was empty".to_owned()));
+    }
+
+    if payload.size_bytes > state.config.max_upload_bytes {
+        return Err(ApiError::PayloadTooLarge(format!(
+            "upload exceeds {} bytes",
+            state.config.max_upload_bytes
+        )));
+    }
+
+    let video_id = Uuid::new_v4();
+    let temp_key = incoming_object_key(video_id);
+    let upload_url = presign_put_object(
+        &state.services.s3_public,
+        &state.config.raw_bucket,
+        &temp_key,
+        Duration::from_secs(DIRECT_UPLOAD_URL_TTL_SECS),
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+
+    info!(
+        video_id = %video_id,
+        filename = %payload.filename,
+        declared_size_bytes = payload.size_bytes,
+        temp_key = %temp_key,
+        "direct upload initialized"
+    );
+
+    Ok(Json(DirectUploadInitResponse {
+        video_id,
+        upload_url,
+        shareable_url: shareable_url(video_id),
+    }))
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/uploads/{id}/complete",
+    tag = "videos",
+    params(
+        ("id" = Uuid, Path, description = "Video identifier")
+    ),
+    request_body = DirectUploadCompleteRequest,
+    responses(
+        (status = 201, description = "Upload finalized and queued", body = UploadVideoResponse),
+        (status = 400, description = "Invalid upload request", body = crate::routes::ErrorResponse),
+        (status = 413, description = "Upload too large", body = crate::routes::ErrorResponse),
+        (status = 415, description = "Unsupported video format", body = crate::routes::ErrorResponse),
+        (status = 500, description = "Internal server error", body = crate::routes::ErrorResponse)
+    )
+)]
+pub(crate) async fn complete_direct_upload(
+    State(state): State<AppState>,
+    Path(video_id): Path<Uuid>,
+    Json(payload): Json<DirectUploadCompleteRequest>,
+) -> Result<(StatusCode, Json<UploadVideoResponse>), ApiError> {
+    let temp_key = incoming_object_key(video_id);
+    let object = head_object(&state.services.s3, &state.config.raw_bucket, &temp_key)
+        .await
+        .map_err(ApiError::Internal)?;
+    let size_bytes = object.content_length().unwrap_or_default().max(0) as u64;
+
+    if size_bytes == 0 {
+        cleanup_object(&state, &temp_key).await;
+        return Err(ApiError::BadRequest("uploaded object was empty".to_owned()));
+    }
+
+    if size_bytes > state.config.max_upload_bytes {
+        cleanup_object(&state, &temp_key).await;
+        return Err(ApiError::PayloadTooLarge(format!(
+            "upload exceeds {} bytes",
+            state.config.max_upload_bytes
+        )));
+    }
+
+    let sniff_range = format!("bytes=0-{}", MAX_SNIFF_BYTES.saturating_sub(1));
+    let sniffed = get_object_bytes(
+        &state.services.s3,
+        &state.config.raw_bucket,
+        &temp_key,
+        Some(&sniff_range),
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+
+    let Some(detected_format) = detect_format(&sniffed) else {
+        cleanup_object(&state, &temp_key).await;
+        return Err(ApiError::UnsupportedMediaType(
+            "unsupported video format".to_owned(),
+        ));
+    };
+
+    let filename = sanitize_filename(Some(payload.filename.as_str()), detected_format);
+    let raw_key = raw_object_key(video_id, detected_format);
+    copy_object(
+        &state.services.s3,
+        &state.config.raw_bucket,
+        &temp_key,
+        &raw_key,
+        detected_format.mime_type(),
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+
+    let insert_result = insert_video(
+        &state.services.db,
+        &NewVideo {
+            id: video_id,
+            filename,
+            mime_type: detected_format.mime_type().to_owned(),
+            size_bytes: size_bytes as i64,
+            status: VideoStatus::Pending,
+            raw_key: raw_key.clone(),
+            detected_format,
+        },
+    )
+    .await;
+    let record = match insert_result {
+        Ok(record) => record,
+        Err(error) => {
+            cleanup_object(&state, &raw_key).await;
+            cleanup_object(&state, &temp_key).await;
+            return Err(ApiError::Internal(error));
+        }
+    };
+
+    let job = TranscodeJob {
+        video_id,
+        source_bucket: state.config.raw_bucket.clone(),
+        source_key: raw_key.clone(),
+        output_bucket: state.config.hls_bucket.clone(),
+        output_prefix: hls_output_prefix(video_id),
+    };
+
+    if let Err(error) =
+        enqueue_transcode_job(&state.services.redis, &state.config.transcode_stream, &job).await
+    {
+        warn!(
+            video_id = %video_id,
+            error = %error,
+            "failed to enqueue direct upload transcode job, cleaning up upload"
+        );
+        if let Err(cleanup_error) = delete_video(&state.services.db, video_id).await {
+            warn!(video_id = %video_id, error = %cleanup_error, "failed to rollback video row");
+        }
+        cleanup_object(&state, &raw_key).await;
+        cleanup_object(&state, &temp_key).await;
+        return Err(ApiError::Internal(error));
+    }
+
+    cleanup_object(&state, &temp_key).await;
+    info!(
+        video_id = %record.id,
+        size_bytes,
+        raw_key = %record.raw_key,
+        "direct upload finalized"
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(UploadVideoResponse {
+            id: record.id,
+            shareable_url: shareable_url(record.id),
+        }),
+    ))
+}
+
+#[utoipa::path(
+    post,
     path = "/api/videos",
     tag = "videos",
     request_body(
         content = inline(crate::docs::UploadVideoRequest),
         content_type = "multipart/form-data",
-        description = "Multipart upload with a single `video` file field"
+        description = "Legacy multipart upload with a single `video` file field"
     ),
     responses(
         (status = 201, description = "Upload accepted", body = UploadVideoResponse),
@@ -219,7 +429,7 @@ pub(crate) async fn upload_video(
         StatusCode::CREATED,
         Json(UploadVideoResponse {
             id: record.id,
-            shareable_url: format!("/watch/{}", record.id),
+            shareable_url: shareable_url(record.id),
         }),
     ))
 }
@@ -243,6 +453,10 @@ fn header_upload_too_large(
     Ok(parsed > max_upload_bytes.saturating_add(overhead_grace_bytes))
 }
 
+fn shareable_url(video_id: Uuid) -> String {
+    format!("/watch/{video_id}")
+}
+
 fn upload_temp_path() -> PathBuf {
     std::env::temp_dir().join(format!("hermes-upload-{}", Uuid::new_v4()))
 }
@@ -261,11 +475,18 @@ async fn cleanup_temp_file(path: &PathBuf) {
     }
 }
 
+async fn cleanup_object(state: &AppState, key: &str) {
+    if let Err(error) = delete_object(&state.services.s3, &state.config.raw_bucket, key).await {
+        warn!(bucket = %state.config.raw_bucket, key, error = %error, "failed to cleanup object");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use axum::http::{header::CONTENT_LENGTH, HeaderValue};
+    use uuid::Uuid;
 
-    use super::header_upload_too_large;
+    use super::{header_upload_too_large, shareable_url};
 
     #[test]
     fn content_length_precheck_allows_reasonable_multipart_overhead() {
@@ -283,5 +504,13 @@ mod tests {
 
         let result = header_upload_too_large(&headers, 1024, 64).unwrap();
         assert!(result);
+    }
+
+    #[test]
+    fn shareable_url_points_to_watch_route() {
+        assert_eq!(
+            shareable_url(Uuid::nil()),
+            "/watch/00000000-0000-0000-0000-000000000000"
+        );
     }
 }
